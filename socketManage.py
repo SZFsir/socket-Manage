@@ -15,7 +15,8 @@ MAX_CONNECTION_NUMBER = 16
 EXIT_FLAG = False
 slaves = {}
 interactive_slave = None
-interactive_state = False
+interactive_state = 'common_rec'
+interactive_user = None
 
 # 每个slave一把锁lock
 locks = {}
@@ -49,40 +50,37 @@ class Slave(object):
     def getinfo(self):
         return self.hostname, self.port, self.node_hash, self.first_connect_time
 
-    def interactive_shell(self, user_fd):
-        global interactive_state
-        self.interactive = True
-        t = threading.Thread(target=transfer2user, args=(user_fd, 'interactive_shell'),
-                             kwargs={'slave_fd': self.socket_fd, 'slave': self})
-        t.start()
-        lock = locks[self.slave.node_hash]
+    def slave_rec(self):
+        lock = locks[self.node_hash]
         lock.acquire()
         # 接受被控shell信息发送给用户
         try:
             while True:
+                buf = b''
                 if EXIT_FLAG:
                     break
-                self.socket_fd.settimeout(30)
-                if not interactive_state:
-                    break
-                try:
-                    buf = self.socket_fd.recv(2048)
-                except socket.timeout:
-                    continue
+                while True:
+                    rec = self.socket_fd.recv(2048)
+                    buf += rec
+                    if len(rec) <= 2048:
+                        break
                 if buf == b'':
                     break
                 try:
                     if buf:
-                        bufss = str(buf, encoding="utf-8")
-                        fd_send(user_fd, bufss)
+                        if interactive_state == 'interactive_state' and interactive_slave == self:
+                            bufss = str(buf, encoding="utf-8")
+                            fd_send(interactive_user, bufss)
+                        elif interactive_state == 'common_rec' or interactive_slave != self:
+                            savelog(self.hostname, str(self.port), buf)
                 except:
                     traceback.print_exc()
-                    Log.error('Something wrong in send buf to user')
+                    Log.error('Something wrong in send buf to user, But we saved in to file.', interactive_user)
+                    savelog(self.hostname, str(self.port), buf)
                     print('something wrong!')
-                if not self.interactive:
-                    break
         except:
             traceback.print_exc()
+            lock.release()
         lock.release()
 
     def writecrontab(self):
@@ -91,6 +89,40 @@ class Slave(object):
     def del_socket(self):
         if self.node_hash in slaves.keys():
             slaves.pop(self.node_hash)
+
+
+def savelog(shost, sport, buf):
+    t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
+    path = './log/' + t + shost + ' : ' + sport + '.log'
+    recent.append([path, datetime.datetime.now()])
+    with open(path, 'wb') as f:
+        f.write(buf)
+
+# def socket_recieve(slave):
+#
+#     global recent
+#     # 没有操作交互shell时，每个连接socket加一个收听进程。
+#     shost, sport = slave.socket_fd.getpeername()
+#     while True:
+#         if EXIT_FLAG:
+#             break
+#         slave.socket_fd.settimeout(3)
+#         try:
+#             buf = slave.socket_fd.recv(2048)
+#         except socket.timeout:
+#             time.sleep(5)
+#         if buf == b'':
+#             break
+#         if buf:
+#             t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
+#             path = './log/' + t + shost + ' : ' + str(sport) + '.log'
+#             recent.append([path, datetime.datetime.now()])
+#             with open(path, 'wb') as f:
+#                 f.write(buf)
+#         while interactive_state:
+#             if interactive_slave.socket_fd != slave.socket_fd:
+#                 break
+#             time.sleep(0.5)
 
 
 def check_online_slave():
@@ -117,8 +149,7 @@ def transfer2user(user_fd, mod, **kwargs):
         if EXIT_FLAG:
             break
         if mod != 'interactive_shell':
-            msg = '>>>'
-            Log.command(msg, user_fd)
+            Log.command('>>>', user_fd)
         buf = user_fd.recv(2048)
         if buf == b'':
             break
@@ -129,7 +160,7 @@ def transfer2user(user_fd, mod, **kwargs):
                 slave_fd = kwargs['slave_fd']
                 slave = kwargs['slave']
                 if command == 'exit\n':
-                    interactive_state = False
+                    interactive_state = 'common_rec'
                     interactive_slave = None
                     break
                 try:
@@ -149,14 +180,16 @@ def transfer2user(user_fd, mod, **kwargs):
                         msg = 'Please choose the slave you want to Control\n'
                         fd_send(user_fd, msg)
                         continue
-                    interactive_state = True
-                    t = threading.Thread(target=slave.interactive_shell, args=(user_fd,))
+                    interactive_state = 'interactive_state'
+                    t = threading.Thread(target=transfer2user, args=(user_fd, 'interactive_shell'),
+                                         kwargs={'slave_fd': slave.socket_fd, 'slave': slave})
                     t.start()
-                    while interactive_state:
+                    while interactive_state == 'interactive_state':
                         if EXIT_FLAG:
                             break
                         time.sleep(1)
                 elif command == 'exit\n':
+                    interactive_user == None
                     user_fd.shutdown(socket.SHUT_RDWR)
                     user_fd.close()
                     break
@@ -255,33 +288,6 @@ def print_command(user_fd):
     Log.info(msg, user_fd)
 
 
-def socket_recieve(slave):
-
-    global recent
-    # 没有操作交互shell时，每个连接socket加一个收听进程。
-    shost, sport = slave.socket_fd.getpeername()
-    while True:
-        if EXIT_FLAG:
-            break
-        slave.socket_fd.settimeout(3)
-        try:
-            buf = slave.socket_fd.recv(2048)
-        except socket.timeout:
-            time.sleep(5)
-        if buf == b'':
-            break
-        if buf:
-            t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
-            path = './log/' + t + shost + ' : ' + str(sport) + '.log'
-            recent.append([path, datetime.datetime.now()])
-            with open(path, 'wb') as f:
-                f.write(buf)
-        while interactive_state:
-            if interactive_slave.socket_fd != slave.socket_fd:
-                break
-            time.sleep(0.5)
-
-
 def master(port):
     master_fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     master_fd.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -299,8 +305,15 @@ def master(port):
         lock = threading.RLock()
         locks[slave.node_hash] = lock
         log_save(slave_fd)
-        t = threading.Thread(target=socket_recieve, args=(slave, ))
+        t = threading.Thread(target=slave.slave_rec)
         t.start()
+        try:
+            if interactive_user:
+                msg = '\nSlave %s : %d is Online!\n' % (slave.hostname, slave.port)
+                Log.warning(msg, interactive_user)
+                Log.command('>>>', interactive_user)
+        except:
+            traceback.print_exc()
 
     master_fd.shutdown(socket.SHUT_RDWR)
     master_fd.close()
@@ -392,7 +405,8 @@ def manage(user_fd):
         user_fd.shutdown(socket.SHUT_RDWR)
         user_fd.close()
         return False
-
+    global interactive_user
+    interactive_user = user_fd
     t = threading.Thread(target=transfer2user, args=(user_fd, 'Control_Command'))
     t.start()
 
