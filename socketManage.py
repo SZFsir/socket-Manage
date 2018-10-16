@@ -8,7 +8,9 @@ import datetime
 from hashlib import md5
 import time
 from utils.log import Log
+from utils.io import save_info, log_save, server_log
 import traceback
+import optparse
 
 
 MAX_CONNECTION_NUMBER = 16
@@ -72,15 +74,25 @@ class Slave(object):
                             bufss = str(buf, encoding="utf-8")
                             fd_send(interactive_user, bufss)
                         elif interactive_state == 'common_rec' or interactive_slave != self:
-                            savelog(self.hostname, str(self.port), buf)
-                except:
-                    traceback.print_exc()
+                            t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
+                            path = './log/' + t + self.hostname + ' : ' + str(self.port) + '.log'
+                            recent.append([path, datetime.datetime.now()])
+                            save_info(path, buf, interactive_user)
+                except Exception as e:
+                    server_log(traceback.format_exc())
                     Log.error('Something wrong in send buf to user, But we saved in to file.', interactive_user)
-                    savelog(self.hostname, str(self.port), buf)
-                    print('something wrong!')
+                    t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
+                    path = './log/' + t + self.hostname + ' : ' + str(self.port) + '.log'
+                    recent.append([path, datetime.datetime.now()])
+                    save_info(path, buf, interactive_user)
+                    server_log('\nsomething wrong!\n')
         except:
-            traceback.print_exc()
+            server_log(traceback.format_exc())
             lock.release()
+
+        self.del_socket()
+        self.socket_fd.shutdown(socket.SHUT_RDWR)
+        self.socket_fd.close()
         lock.release()
 
     def writecrontab(self):
@@ -89,14 +101,6 @@ class Slave(object):
     def del_socket(self):
         if self.node_hash in slaves.keys():
             slaves.pop(self.node_hash)
-
-
-def savelog(shost, sport, buf):
-    t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
-    path = './log/' + t + shost + ' : ' + sport + '.log'
-    recent.append([path, datetime.datetime.now()])
-    with open(path, 'wb') as f:
-        f.write(buf)
 
 # def socket_recieve(slave):
 #
@@ -134,7 +138,7 @@ def check_online_slave():
             fd_send(slaves[key].socket_fd, msg)
             #slaves[key].socket_fd.recv(2048)
         except socket.error:
-            traceback.print_exc()
+            server_log(traceback.format_exc())
             l.append(key)
 
     for key in l:
@@ -145,7 +149,7 @@ def transfer2user(user_fd, mod, **kwargs):
     """所有接受用户消息进程都归于此"""
     global interactive_slave, EXIT_FLAG, interactive_state
     while True:
-        print('get user info')
+        server_log('get user info\n')
         if EXIT_FLAG:
             break
         if mod != 'interactive_shell':
@@ -155,7 +159,7 @@ def transfer2user(user_fd, mod, **kwargs):
             break
         if buf:
             command = str(buf, encoding="utf-8")
-            print(command)
+            server_log(command)
             if mod == 'interactive_shell':
                 slave_fd = kwargs['slave_fd']
                 slave = kwargs['slave']
@@ -178,7 +182,7 @@ def transfer2user(user_fd, mod, **kwargs):
                     slave = interactive_slave
                     if not slave:
                         msg = 'Please choose the slave you want to Control\n'
-                        fd_send(user_fd, msg)
+                        Log.warning(msg, user_fd)
                         continue
                     interactive_state = 'interactive_state'
                     t = threading.Thread(target=transfer2user, args=(user_fd, 'interactive_shell'),
@@ -226,7 +230,6 @@ def print_salve(user_fd):
     global interactive_slave
     i = 0
     #check_online_slave()
-    print(slaves)
     for key in slaves.keys():
         info = slaves[key].getinfo()
         sinfo = '[' + str(i) + '] ' + str(info[0]) + ' ' + str(info[1]) + ' ' + str(info[2]) + ' ' + info[3] + '\n'
@@ -304,31 +307,22 @@ def master(port):
         # 记录连接
         lock = threading.RLock()
         locks[slave.node_hash] = lock
-        log_save(slave_fd)
+        now = datetime.datetime.now()
+        connections.append([slave.hostname, str(slave.port), now])
+        log_save(slave_fd, interactive_user)
         t = threading.Thread(target=slave.slave_rec)
         t.start()
         try:
+            msg = '\nSlave %s : %d is Online!\n' % (slave.hostname, slave.port)
+            server_log(msg)
             if interactive_user:
-                msg = '\nSlave %s : %d is Online!\n' % (slave.hostname, slave.port)
                 Log.warning(msg, interactive_user)
                 Log.command('>>>', interactive_user)
-        except:
-            traceback.print_exc()
+        except Exception as e:
+            server_log(traceback.format_exc())
 
     master_fd.shutdown(socket.SHUT_RDWR)
     master_fd.close()
-
-
-def log_save(fd):
-    global connections
-    shost, sport = fd.getpeername()
-    now = datetime.datetime.now()
-    connections.append([shost, str(sport), now])
-    msg = shost + ' ' + str(sport) + ' is connect\n'
-    t = datetime.datetime.now().strftime("%Y-%m-%d")
-    path = './log/' + t + '.log'
-    with open(path, 'a') as f:
-        Log.log(msg, f)
 
 
 def printlogo(user_fd):
@@ -344,7 +338,6 @@ def printlogo(user_fd):
 
 
 def fd_send(fd, message):
-    print(message)
     infob = str.encode(message)
     fd.send(infob)
 
@@ -362,7 +355,6 @@ def check_admin(user_fd):
             break
         with open('auth', 'r') as f:
             psw = f.read()
-            print(psw)
         if buf:
             bufss = str(buf, encoding="utf-8")
             if bufss != psw:
@@ -401,7 +393,7 @@ def manage(user_fd):
         Log.success(msg, user_fd)
     else:
         msg = 'You are not admin, exit now \n'
-        fd_send(user_fd, msg)
+        Log.info(msg, user_fd)
         user_fd.shutdown(socket.SHUT_RDWR)
         user_fd.close()
         return False
@@ -412,13 +404,18 @@ def manage(user_fd):
 
 
 def main():
-    while True:
-        # 管理进程，接受反弹shell以及消息.
-        t1 = threading.Thread(target=master, args=(8985,))
-        t1.start()
-        user_connect(3123)
+    # 管理进程，接受反弹shell以及消息.
+    parse = optparse.OptionParser("python %prog --server-port <target stream> --user-port <target file path>")
+    parse.add_option('--server-port', dest='sport', type='int', help='Server listen this port.')
+    parse.add_option('--user-port', dest='uport', type='int', help='User connect from this port')
 
-        time.sleep(1000000000000)
+    (options, args) = parse.parse_args()
+    if not options.sport or not options.uport:
+        print('Use -h to see usage')
+    else:
+        t1 = threading.Thread(target=master, args=(options.sport,))
+        t1.start()
+        user_connect(options.uport)
 
 
 if __name__ == '__main__':

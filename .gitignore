@@ -1,5 +1,5 @@
 venv/
 .idea
-log/
+*.log
 *.pyc
 auth

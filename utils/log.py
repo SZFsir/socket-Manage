@@ -12,11 +12,11 @@ class Log():
     @staticmethod
     def _print(word, fd):
         if isinstance(fd, socket.socket):
-            print(word)
+            server_log(word)
             infob = str.encode(word)
             fd.send(infob)
         else:
-            msg = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S  ") + word
+            msg = datetime.datetime.now().strftime("[ %Y-%m-%d %H:%M:%S ]  ") + word
             fd.write(msg)
 
     @staticmethod
@@ -24,7 +24,7 @@ class Log():
         Log._print("%s" % word, fd)
 
     @staticmethod
-    def info(word, fd):
+    def info(word, fd=None):
         Log._print("%s" % color.blue(word), fd)
 
     @staticmethod
@@ -32,11 +32,11 @@ class Log():
         Log._print("%s" % color.cyan(word), fd)
 
     @staticmethod
-    def warning(word, fd):
+    def warning(word, fd=None):
         Log._print("%s" % color.yellow(word), fd)
 
     @staticmethod
-    def error(word, fd):
+    def error(word, fd=None):
         Log._print("%s" % color.red(word), fd)
 
     @staticmethod
@@ -51,3 +51,11 @@ class Log():
     def context(context):
         Log._print("%s" % (color.red(context)))
 
+
+def server_log(msg):
+    path = './log/severlog.log'
+    try:
+        with open(path, 'a') as f:
+            Log.log(msg, f)
+    except FileNotFoundError:
+        print('\n./Log/ directory is not exist. Can not write file.\n')
