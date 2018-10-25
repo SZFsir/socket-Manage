@@ -2,4 +2,6 @@ venv/
 .idea
 *.log
 *.pyc
+*.jpg
+*.png
 auth

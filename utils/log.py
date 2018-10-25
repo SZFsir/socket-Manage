@@ -8,6 +8,7 @@ import socket
 import datetime
 
 
+
 class Log():
     @staticmethod
     def _print(word, fd):
@@ -16,8 +17,13 @@ class Log():
             infob = str.encode(word)
             fd.send(infob)
         else:
-            msg = datetime.datetime.now().strftime("[ %Y-%m-%d %H:%M:%S ]  ") + word
-            fd.write(msg)
+            try:
+                msg = datetime.datetime.now().strftime("[ %Y-%m-%d %H:%M:%S ]  ") + word
+                fd.write(msg)
+            except:
+                msg = datetime.datetime.now().strftime("[ %Y-%m-%d %H:%M:%S ]  ") + 'something wrong ' \
+                                                                                    'in save command\n\n'
+                fd.write(msg)
 
     @staticmethod
     def log(word, fd):

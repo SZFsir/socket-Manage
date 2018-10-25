@@ -11,6 +11,7 @@ from utils.log import Log
 from utils.io import save_info, log_save, server_log
 import traceback
 import optparse
+import re
 
 
 MAX_CONNECTION_NUMBER = 16
@@ -19,6 +20,7 @@ slaves = {}
 interactive_slave = None
 interactive_state = 'common_rec'
 interactive_user = None
+
 
 # 每个slave一把锁lock
 locks = {}
@@ -40,7 +42,7 @@ class Slave(object):
 
     def __init__(self, socket_fd):
         self.socket_fd = socket_fd
-        self.name = None
+        self.name = ''
         self.hostname, self.port = socket_fd.getpeername()
         self.node_hash = node_hashs(self.hostname, self.port)
         self.interactive = False
@@ -50,7 +52,7 @@ class Slave(object):
         self.name = name
 
     def getinfo(self):
-        return self.hostname, self.port, self.node_hash, self.first_connect_time
+        return self.name, self.hostname, self.port, self.first_connect_time
 
     def slave_rec(self):
         lock = locks[self.node_hash]
@@ -62,8 +64,11 @@ class Slave(object):
                 if EXIT_FLAG:
                     break
                 while True:
-                    rec = self.socket_fd.recv(2048)
-                    buf += rec
+                    try:
+                        rec = self.socket_fd.recv(2048)
+                        buf += rec
+                    except Exception as e:
+                        server_log(traceback.format_exc())
                     if len(rec) <= 2048:
                         break
                 if buf == b'':
@@ -76,7 +81,8 @@ class Slave(object):
                         elif interactive_state == 'common_rec' or interactive_slave != self:
                             t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
                             path = './log/' + t + self.hostname + ' : ' + str(self.port) + '.log'
-                            recent.append([path, datetime.datetime.now()])
+                            if [path, datetime.datetime.now()] not in recent:
+                                recent.append([path, datetime.datetime.now()])
                             save_info(path, buf, interactive_user)
                 except Exception as e:
                     server_log(traceback.format_exc())
@@ -89,10 +95,10 @@ class Slave(object):
         except:
             server_log(traceback.format_exc())
             lock.release()
-
-        self.del_socket()
-        self.socket_fd.shutdown(socket.SHUT_RDWR)
-        self.socket_fd.close()
+        try:
+            self.disconnect()
+        except:
+            pass
         lock.release()
 
     def writecrontab(self):
@@ -101,6 +107,11 @@ class Slave(object):
     def del_socket(self):
         if self.node_hash in slaves.keys():
             slaves.pop(self.node_hash)
+
+    def disconnect(self):
+        self.del_socket()
+        self.socket_fd.shutdown(socket.SHUT_RDWR)
+        self.socket_fd.close()
 
 # def socket_recieve(slave):
 #
@@ -147,12 +158,19 @@ def check_online_slave():
 
 def transfer2user(user_fd, mod, **kwargs):
     """所有接受用户消息进程都归于此"""
-    global interactive_slave, EXIT_FLAG, interactive_state
+    global interactive_slave, EXIT_FLAG, interactive_state, choosed_slave, interactive_user
+    choosed_slave = None
     while True:
         server_log('get user info\n')
         if EXIT_FLAG:
             break
         if mod != 'interactive_shell':
+            if choosed_slave:
+                if choosed_slave.name:
+                    msg = '(' + choosed_slave.name + ')'
+                else:
+                    msg = '(' + choosed_slave.hostname + ')'
+                Log.error(msg, user_fd)
             Log.command('>>>', user_fd)
         buf = user_fd.recv(2048)
         if buf == b'':
@@ -163,23 +181,40 @@ def transfer2user(user_fd, mod, **kwargs):
             if mod == 'interactive_shell':
                 slave_fd = kwargs['slave_fd']
                 slave = kwargs['slave']
-                if command == 'exit\n':
+                if command == 'Ex1t\n':
                     interactive_state = 'common_rec'
                     interactive_slave = None
                     break
+
                 try:
                     fd_send(slave_fd, command)
                 except socket.error:
                     slave.del_socket()
+                if command == 'exit\n':
+                    time.sleep(0.5)
+                    try:
+                        msg = '\n'
+                        fd_send(slave_fd, msg)
+                        fd_send(slave_fd, msg)
+                        # slaves[key].socket_fd.recv(2048)
+                    except socket.error:
+                        server_log(traceback.format_exc())
+                        check_online_slave()
+                        interactive_state = 'common_rec'
+                        interactive_slave = None
+                        break
+
             elif mod == 'Control_Command':
                 if command == 's\n':
+                    check_online_slave()
                     print_salve(user_fd)
                 elif command == '\n':
                     continue
                 elif command == 'r\n':
                     recent_log(user_fd)
                 elif command == 'i\n':
-                    slave = interactive_slave
+                    slave = choosed_slave
+                    interactive_slave = choosed_slave
                     if not slave:
                         msg = 'Please choose the slave you want to Control\n'
                         Log.warning(msg, user_fd)
@@ -192,6 +227,7 @@ def transfer2user(user_fd, mod, **kwargs):
                         if EXIT_FLAG:
                             break
                         time.sleep(1)
+                    choosed_slave = None
                 elif command == 'exit\n':
                     interactive_user == None
                     user_fd.shutdown(socket.SHUT_RDWR)
@@ -202,37 +238,64 @@ def transfer2user(user_fd, mod, **kwargs):
                     msg = 'input the number of slave\n'
                     Log.warning(msg, user_fd)
                     print_salve(user_fd)
-                    transfer2user(user_fd, 'choose_slave')
+                    choosed_slave = transfer2user(user_fd, 'choose_slave')
+                elif command == 'd\n':
+
+                    slave = choosed_slave
+                    if not slave:
+                        msg = 'Please choose the slave you want to Control\n'
+                        Log.error(msg, user_fd)
+                        continue
+                    slave.disconnect()
+
+                    msg = 'success to delete the slave \n'
+                    Log.success(msg, user_fd)
+                    choosed_slave = None
+                elif command[0] == 'n' and command[1] == ' ':
+                    slave = choosed_slave
+                    if not slave:
+                        msg = 'Please choose the slave you want to Control\n'
+                        Log.error(msg, user_fd)
+                        continue
+                    pa = re.compile(r'n (.*?)\n')
+                    res = pa.findall(command)
+                    if not res:
+                        msg = 'Please rewrite the name.\n'
+                        Log.error(msg, user_fd)
+                        continue
+                    slave.name = res[0]
+                    choosed_slave = None
                 else:
                     print_command(user_fd)
             elif mod == 'choose_slave':
                 slave_num = command.strip()
                 if slave_num == 'q':
-                    break
+                    return None
                 i = 0
                 for key in slaves.keys():
                     if str(i) == slave_num:
-                        interactive_slave = slaves[key]
+                        choosed_slave = slaves[key]
                         break
                     i += 1
-                if interactive_slave:
+                if choosed_slave:
                     msg = 'select the slave :'
-                    msg += interactive_slave.hostname + ' : ' + str(interactive_slave.port) + '\n'
+                    msg += choosed_slave.hostname + ' : ' + str(choosed_slave.port) + '\n'
                     Log.success(msg, user_fd)
-                    return True
+                    return choosed_slave
                 else:
                     msg = 'Do not have this slave.\n'
                     fd_send(user_fd, msg)
-                    return False
+                    return None
 
 
 def print_salve(user_fd):
-    global interactive_slave
     i = 0
-    #check_online_slave()
     for key in slaves.keys():
         info = slaves[key].getinfo()
-        sinfo = '[' + str(i) + '] ' + str(info[0]) + ' ' + str(info[1]) + ' ' + str(info[2]) + ' ' + info[3] + '\n'
+        sinfo = '[' + str(i) + '] '
+        for m in info:
+            sinfo += str(m) + ' '
+        sinfo += '\n'
         Log.info(sinfo, user_fd)
         i += 1
     if i == 0:
@@ -258,9 +321,13 @@ def recent_log(user_fd):
     msg = ''
     for rec in recent:
         path, dates = rec[0], rec[1]
-        with open(path, 'rb') as f:
-            s = str(f.read(), 'utf-8')
-        msg += path + '\n' + s + '\n\n'
+        try:
+            with open(path, 'rb') as f:
+                s = str(f.read(), 'utf-8')
+            msg += path + '\n' + s + '\n\n'
+        except:
+            msg += path + '\n' + 'This file have something wrong!.\n\n'
+
     if not recent:
         msg = 'Do not have recent information Logs\n'
         msg += 'You can read entail Log in directory\n'
@@ -284,8 +351,9 @@ def recent_log(user_fd):
 
 def print_command(user_fd):
     msg = '''    [s] : show all slave
+    [d] : delete the slave (after choose)
     [c] : choose a slave
-    [i] : open a interactive shell
+    [i] : open a interactive shell (after choose)
     [r] : To print Recent connect log
     [exit] : exit\n'''
     Log.info(msg, user_fd)
