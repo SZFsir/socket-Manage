@@ -15,7 +15,7 @@ class Log():
         if isinstance(fd, socket.socket):
             server_log(word)
             infob = str.encode(word)
-            fd.send(infob)
+            fd.sendall(infob)
         else:
             try:
                 msg = datetime.datetime.now().strftime("[ %Y-%m-%d %H:%M:%S ]  ") + word
